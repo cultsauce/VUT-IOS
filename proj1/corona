@@ -1,0 +1,304 @@
+#!/bin/bash
+
+export POSIXLY_CORRECT=yes
+export LC_ALL=C
+COMMAND=""
+
+# filter arguments
+ADATETIME=None
+BDATETIME=None
+GENDER=None
+HIST=0
+USERDEF=-1
+
+# header to use for all files
+HEADER="id,datum,vek,pohlavi,kraj_nuts_kod,okres_lau_kod,nakaza_v_zahranici,nakaza_zeme_csu_kod,reportovano_khs"
+
+
+help(){
+    echo "Usage: corona [-h] [FILTERS] [COMMAND] [LOG [LOG2 [...]]"
+    echo ""
+    echo "FILTERS:  -a DATETIME — after: only dates AFTER this date are considered (including this date)"
+    echo "          -b DATETIME — before: only dates BEFORE this date are considered (including this date)"
+    echo "          -g GENDER — only cases of the specified gender are considered - M = men, Z = women"
+    echo "          -s [WIDTH] — parameter WIDTH sets the width of the histograms, has to be a positive integer"
+    echo "COMMAND:  infected — counts the number of infected cases"
+    echo "          merge — merges specified files into one, keeping the original order of records"
+    echo "          gender — prints out the number of cases for each gender"
+    echo "          age — prints out the number of cases according to age"
+    echo "          daily — prints out the number of cases for each day"
+    echo "          monthly — prints out the number of cases for each month"
+    echo "          yearly — prints out the number of cases for each year"
+    echo "          countries — prints out the number of cases according to country of infection origin"
+    echo "          districts — prints out the number of cases according to districts"
+    echo "          regions — prints out the number of cases according to regions"
+    echo ""
+}
+
+
+gender(){
+    awk -F, '{
+    counts[$4]++;
+    }
+    END {
+    printf "M: %d\nZ: %d\n", counts["M"], counts["Z"]; 
+    if ("" in counts) printf "None: %d\n", counts[""];
+    }'
+}
+
+infected(){
+    awk -F, 'END {print NR}'
+}
+
+age(){
+    awk -F, \
+    'BEGIN { 
+    counts["0-5"]=0;
+    for (i=6; i<= 105; i+=10) counts[i"-"(i+9)]=0; 
+    counts[">105"]=0;
+    } 
+    { if ($3 == "") counts["None"]++; 
+    else if (int($3) <= 5) counts["0-5"]++; 
+    else if (int($3) > 105) counts[">105"]++; 
+    else { 
+        for (i=6; i<= 105; i+=10) 
+            { if (int($3) >= i && int($3) < i+10) counts[i"-"(i+9)]++;}
+        } 
+    } 
+    END { 
+        printf "%-6s: %d\n", "0-5", counts["0-5"]; 
+        for (i=6; i<= 105; i+=10) printf "%-6s: %d\n", i"-"(i+9), counts[i"-"(i+9)]; 
+        printf "%-6s: %d\n",">105", counts[">105"]; 
+        if ("None" in counts) printf "%-6s: %d\n","None", counts["None"]; 
+    }'
+}
+
+districts(){
+    awk -F, '{ \
+    counts[$6]++;} \
+    END { \
+    for (i in counts) {if (i == "") printf "None: %d\n", counts[""]; \
+        else printf "%s: %d\n", i, counts[i]}; }' | sort
+}
+
+regions(){
+    awk -F, '{ \
+    counts[$5]++;} \
+    END { \
+    for (i in counts) {
+        if (i == "") printf "None: %d\n", counts[""]; \
+        else printf "%s: %d\n", i, counts[i]}; 
+        }' | sort
+}
+
+countries(){
+    awk -F, '{
+    counts[$8]++;} 
+    END { 
+    for (i in counts) {
+        if (i != "" && i != "CZ") printf "%s: %d\n", i, counts[i];}  
+        }' | sort
+}
+
+daily(){
+    awk -F, '{ \
+    counts[$2]++;} \
+    END { \
+    for (i in counts) 
+        if (i == "") printf "None: %d\n", counts[i]; \
+        else printf "%s: %d\n", i, counts[i];
+        }' | sort
+}
+
+monthly(){
+    awk -F, '{ 
+    if ($2=="") counts["None"]++;
+    else counts[substr($2, 0, 7)]++;} 
+    END { 
+    for (i in counts) 
+        printf "%s: %d\n", i, counts[i];
+        }' | sort
+}
+
+yearly(){
+    awk -F, '{ 
+    if ($2=="") counts["None"]++;
+    counts[substr($2, 0, 4)]++;} 
+    END { 
+    for (i in counts) 
+        printf "%s: %d\n", i, counts[i];
+        }' | sort
+}
+
+# if parameter -s is present, print out results in histogram format
+print_hist(){
+    if [[ HIST -eq 0 || $COMMAND == infected ]]; then
+        cat; return 0;
+    fi
+
+    content=$(cat)
+    longest_num=$(echo "$content" | awk -F": " '{if (max < int($2)) max = int($2)} END {print max}')
+
+    echo "$content" | \
+    awk -F": " -v userdef=$USERDEF -v cmd=$COMMAND -v max_width=$longest_num \
+    'BEGIN{
+        widths["gender"]=100000
+        widths["countries"]=100
+        widths["districts"]=1000
+        widths["yearly"]=100000
+        widths["monthly"]=10000
+        widths["age"]=10000
+        widths["daily"]=500
+        widths["regions"]=10000
+    }
+    { 
+    printf "%s:", $1;
+
+    if (userdef==-1) 
+        width=int($2)/widths[cmd];
+    else 
+        width=(int($2)*userdef)/max_width;
+
+    for (i=0; i<int(width); i++) if (i == 0) printf " #"; else printf "#"; printf "\n";
+    }'
+}
+
+# filter out invalid records if needed
+filter_input(){
+    # remove trailing spaces, \r
+    sed -e '/^[[:space:]]*$/d' -e 's/ //g' -e 's/\r//' | \
+    awk -F, -v cmd=$COMMAND -v GENDER=$GENDER -v ADATE=$ADATETIME -v BDATE=$BDATETIME -v only_date=$1\
+    'function not_valid(date) {
+        y=int(substr(date,0,4)); m=int(substr(date,6,2)); d=int(substr(date,9,2)); 
+        if (y >= 0 && y <= 2022 && m >= 0 && m <= 12) {
+            if ((m==1 || m==3 || m==5 || m==7 || m==8 || m==10 || m==12) && (d <= 31)) 
+                return 0;
+
+            else if ((m==4 || m==6 || m==9 || m==11) && (d <= 30)) 
+                return 0;
+
+            else if (m==2) { 
+                if (((y%4==0 && y%100!=0) || y%400==0) && d <= 29) 
+                    return 0;
+                else if (d <= 28) 
+                    return 0;
+                else 
+                    return 1;
+                } 
+                
+            else return 1;
+        } 
+        else return 1;
+    }
+    BEGIN{OFS="\n"} 
+    {
+    if (only_date == 1) {
+        if (not_valid($0) == 1) exit 1
+        else exit 0
+    }
+    else if (NR == 1) print $0;
+    else if (GENDER=="None" && BDATE=="None" && ADATE=="None" && (cmd=="merge" || cmd=="")) print $0;
+    else 
+    {
+        if ($3 != "" && ($3 < 0 || int($3) != $3)) {
+            printf "Invalid age: %s\n", $0 | "cat 1>&2";
+        }
+        else if ($2 != "" && not_valid($2)) {
+            printf "Invalid date: %s\n", $0 | "cat 1>&2";
+        } 
+        else if ((GENDER=="None" || GENDER==$4) && 
+        (ADATE=="None"  || ADATE<=$2) && (BDATE=="None" || BDATE>=$2)) 
+            print $0;
+    }
+    }'
+}
+
+# prepare input files for parsing
+print_file_contents(){
+    echo $HEADER
+    if [[ ${#LOGFILES[@]} -ne 0 ]]; then
+        for i in ${LOGFILES[@]}; do
+            if [[ $i == *.gz ]]; then
+                gzip -dc $i | tail -n +2 
+            elif [[ $i == *.bz2 ]]; then
+                bzip2 -dc $i | tail -n +2
+            else
+                tail -n +2 $i
+            fi
+        done
+    else 
+        tail -n +2
+    fi
+}
+
+# argument parsing and validation
+while getopts :a:b:g:hs: o; do 
+    case "$o" in
+        h)  help; exit 0
+            ;;
+        a)  (echo $OPTARG | filter_input 1)
+            if [[ $? -eq 0 && "$OPTARG" =~ ^[0-9]+-[0-9]+-[0-9]+$ && $ADATETIME == "None" ]]; then
+                ADATETIME="$OPTARG"
+            else    
+                echo "invalid date $OPTARG passed as argument" >&2; exit 1
+            fi
+            ;;
+        b)  (date -d "$OPTARG"  &> /dev/null)
+            if [[ $? -eq 0 && "$OPTARG" =~ ^[0-9]+-[0-9]+-[0-9]+$ && $BDATETIME == "None" ]]; then
+                BDATETIME="$OPTARG"
+            else    
+                echo "invalid date $OPTARG passed as argument" >&2; exit 1
+            fi
+            ;;
+        g)  if [[ $OPTARG == "M" || $OPTARG == "Z" ]]; then
+                GENDER="$OPTARG"
+            else
+                echo "invalid argument supplied" >&2; exit 1;
+            fi
+            ;;
+        s)  if [[ $OPTARG =~ ^[0-9]+$ ]]; then 
+                USERDEF="$OPTARG";
+            else 
+                ((OPTIND--)) #return back the value that was read by getopts
+            fi
+            HIST=1;;
+        :)  if [ $OPTARG != "s" ]; then
+                echo "$OPTARG requires a argument" >&2; exit 1
+            fi
+            ;;
+        *)  echo "unrecognized argument supplied" >&2; exit 1
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+# sort out command/ file
+for var in $*
+do
+    case $var in
+        gender | age | districts | countries | regions | monthly | yearly | daily | merge | infected) 
+            if [[ $COMMAND == "" ]]; then
+                COMMAND=$var;
+            else 
+                echo "invalid number of commands" >&2; exit 1
+            fi
+        ;;
+        *.csv | *.bz2 | *.gz) 
+            if [[ -f $var ]]; then
+                LOGFILES+=( $var )
+            else
+                echo "specified file does not exist" >&2; exit 1
+            fi
+        ;;
+        *) echo "unrecognized argument supplied" >&2; exit 1
+        ;;
+    esac
+done
+
+# no command specified and with command
+if [[ $COMMAND == "" || $COMMAND == merge ]]; then
+    print_file_contents | filter_input 0
+else 
+    print_file_contents | filter_input 0 | tail -n +2 | $COMMAND | print_hist
+fi
+
